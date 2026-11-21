@@ -610,11 +610,7 @@ fn repay_loan_internal(
         principal_outstanding(&loan) - principal_before,
     );
 
-    // Yield is accounted and claimed in the base token, so interest paid in
-    // any other asset stays in the treasury rather than being distributed.
-    if asset == storage::get_token(env) {
-        distribute_interest(env, interest_component, &asset);
-    }
+    distribute_interest(env, interest_component, &asset);
     // External token interaction last; failed transfers revert all accounting effects.
     util::token_client_for(env, &asset).transfer(&borrower, util::contract_address(env), &amount);
 
@@ -722,10 +718,12 @@ pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
         // Yield is split equally (see `distribute_interest`), so a defaulter
         // keeps earning from here on like any active member, but forfeits
         // whatever yield they had accrued and not yet claimed at the moment
-        // of default. Advancing the snapshot leaves that amount in the
-        // treasury, where it accrues to the remaining members' exit shares.
-        let acc = storage::get_yield_accumulator(env);
-        storage::set_yield_snapshot(env, &loan.borrower, acc);
+        // of default. Advancing the snapshots leaves the amounts in their
+        // respective treasuries.
+        for asset in storage::get_yield_assets(env).iter() {
+            let acc = storage::get_yield_accumulator(env, &asset);
+            storage::set_yield_snapshot(env, &loan.borrower, &asset, acc);
+        }
     }
     storage::extend_instance(env);
 
@@ -760,10 +758,9 @@ pub(crate) fn principal_outstanding(loan: &Loan) -> i128 {
 /// Any indivisible remainder is retained by the treasury.
 ///
 /// Uses a pull-based accumulator: instead of iterating every member and
-/// bumping their `PendingYield` (O(n)), we increment a global
-/// `YieldAccumulator` by `interest / active_members`. Each member stores
-/// a snapshot of the accumulator at their last interaction (join, claim,
-/// or exit). Their pending yield is `(accumulator - snapshot) * 1`.
+/// bumping their `PendingYield` (O(n)), we increment the given asset's
+/// accumulator by `interest / active_members`. Each member stores a snapshot
+/// per asset at their last interaction (join, claim, or exit).
 ///
 /// `pub(crate)` (rather than private) solely so the property tests in
 /// `tests/properties.rs` can drive it directly with arbitrary `interest` values instead
@@ -778,16 +775,18 @@ pub(crate) fn distribute_interest(env: &Env, interest: i128, asset: &Address) {
         return;
     }
 
-    // #60 — Carry the sub-divisible remainder forward instead of silently discarding
-    let total_interest = interest + storage::get_yield_remainder(env);
+    storage::record_yield_asset(env, asset);
+
+    // #60 — Carry the sub-divisible remainder forward instead of silently discarding.
+    let total_interest = interest + storage::get_yield_remainder(env, asset);
     let per_member = total_interest / active;
     let remainder = total_interest % active;
 
-    storage::set_yield_remainder(env, remainder);
+    storage::set_yield_remainder(env, asset, remainder);
 
     if per_member > 0 {
-        let current = storage::get_yield_accumulator(env);
-        storage::set_yield_accumulator(env, current + per_member);
+        let current = storage::get_yield_accumulator(env, asset);
+        storage::set_yield_accumulator(env, asset, current + per_member);
     }
 
     // Unconditionally publish the event so the indexer sees the interest paid

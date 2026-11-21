@@ -302,7 +302,7 @@ proptest! {
         prop_assert_eq!(interest - paid, remainder);
 
         let retained = env.as_contract(&contract_id, || {
-            crate::storage::get_yield_remainder(&env)
+            crate::storage::get_yield_remainder(&env, &asset)
         });
         prop_assert_eq!(retained, remainder);
     }

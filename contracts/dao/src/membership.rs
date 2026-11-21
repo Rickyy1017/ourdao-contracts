@@ -1,8 +1,10 @@
-use soroban_sdk::{symbol_short, Address, Env};
+use soroban_sdk::{symbol_short, Address, Env, Vec};
 
 use crate::error::Error;
 use crate::storage::{self, extend_instance};
-use crate::types::{Member, MemberLoanStats, MemberOverview, MemberStatus, StakingRewardClaimed};
+use crate::types::{
+    AssetBalance, Member, MemberLoanStats, MemberOverview, MemberStatus, StakingRewardClaimed,
+};
 use crate::util;
 
 // `env.events().publish` is deprecated in soroban-sdk in favour of
@@ -45,10 +47,11 @@ pub fn register_member(env: &Env, member: Address) -> Result<(), Error> {
     };
     storage::set_member(env, &record);
 
-    // Snapshot the accumulator so the new member earns nothing from interest
-    // repaid before they joined.
-    let acc = storage::get_yield_accumulator(env);
-    storage::set_yield_snapshot(env, &member, acc);
+    // Snapshot each asset so the new member earns nothing from earlier interest.
+    for asset in storage::get_yield_assets(env).iter() {
+        let acc = storage::get_yield_accumulator(env, &asset);
+        storage::set_yield_snapshot(env, &member, &asset, acc);
+    }
 
     if !is_returning {
         let mut members = storage::get_members(env);
@@ -80,25 +83,43 @@ pub fn exit_dao(env: &Env, member: Address) -> Result<(), Error> {
 
     let share = calculate_exit_share(env, &member);
     let stake = storage::get_stake(env, &member);
+    let base_asset = storage::get_token(env);
     let pending = compute_pending_yield(env, &member);
-    let payout = share + stake + pending;
-
-    // Issue #176: check the contract's actual token balance before attempting
-    // the transfer so a temporarily depleted treasury returns a typed error
-    // instead of trapping with an uninformative host panic.
-    if payout > 0 {
-        let contract_balance = util::token_client(env).balance(&util::contract_address(env));
-        if contract_balance < payout {
-            return Err(Error::InsufficientTreasury);
+    let assets = storage::get_yield_assets(env);
+    let mut payouts = Vec::new(env);
+    let base_share_and_stake = share
+        .checked_add(stake)
+        .ok_or(Error::InsufficientTreasury)?;
+    for asset in assets.iter() {
+        let asset_pending = compute_pending_yield_in_asset(env, &member, &asset);
+        let payout = asset_pending
+            .checked_add(if asset == base_asset {
+                base_share_and_stake
+            } else {
+                0
+            })
+            .ok_or(Error::InsufficientTreasury)?;
+        if payout > 0 {
+            let contract_balance =
+                util::token_client_for(env, &asset).balance(&util::contract_address(env));
+            if contract_balance < payout {
+                return Err(Error::InsufficientTreasury);
+            }
+            payouts.push_back(AssetBalance {
+                asset,
+                balance: payout,
+            });
         }
     }
     if stake > 0 {
         storage::set_stake(env, &member, 0);
         storage::set_total_staked(env, storage::get_total_staked(env) - stake);
     }
-    // Settle yield: snapshot to current accumulator so rejoining starts clean.
-    let acc = storage::get_yield_accumulator(env);
-    storage::set_yield_snapshot(env, &member, acc);
+    // Settle each asset so rejoining starts with no previously accrued yield.
+    for asset in assets.iter() {
+        let acc = storage::get_yield_accumulator(env, &asset);
+        storage::set_yield_snapshot(env, &member, &asset, acc);
+    }
 
     // Release the member's name so they can re-register after rejoining.
     if let Some(name) = storage::get_name_of(env, &member) {
@@ -127,8 +148,18 @@ pub fn exit_dao(env: &Env, member: Address) -> Result<(), Error> {
 
     // Interact only after all membership, stake and yield effects are written.
     // Soroban rolls back these writes if the token transfer fails.
-    if payout > 0 {
-        util::token_client(env).transfer(&util::contract_address(env), &member, &payout);
+    for payout in payouts.iter() {
+        util::token_client_for(env, &payout.asset).transfer(
+            &util::contract_address(env),
+            &member,
+            &payout.balance,
+        );
+        if payout.asset != base_asset {
+            env.events().publish(
+                (symbol_short!("exit_a"),),
+                (member.clone(), payout.asset, payout.balance),
+            );
+        }
     }
 
     env.events()
@@ -139,25 +170,50 @@ pub fn exit_dao(env: &Env, member: Address) -> Result<(), Error> {
 #[allow(deprecated)]
 pub fn claim_rewards(env: &Env, member: Address) -> Result<i128, Error> {
     util::require_initialized(env)?;
+    let base_asset = storage::get_token(env);
+    claim_rewards_in_asset_internal(env, member, base_asset)
+}
+
+#[allow(deprecated)]
+pub fn claim_rewards_in_asset(
+    env: &Env,
+    member: Address,
+    asset: Address,
+) -> Result<i128, Error> {
+    claim_rewards_in_asset_internal(env, member, asset)
+}
+
+#[allow(deprecated)]
+fn claim_rewards_in_asset_internal(
+    env: &Env,
+    member: Address,
+    asset: Address,
+) -> Result<i128, Error> {
+    util::require_initialized(env)?;
     util::require_not_paused(env)?;
     util::require_active_member(env, &member)?;
-    let pending = compute_pending_yield(env, &member);
+    let pending = compute_pending_yield_in_asset(env, &member, &asset);
     if pending <= 0 {
         return Err(Error::NothingToClaim);
     }
-    // Settle: advance snapshot to current accumulator.
-    let acc = storage::get_yield_accumulator(env);
-    storage::set_yield_snapshot(env, &member, acc);
-    util::token_client(env).transfer(&util::contract_address(env), &member, &pending);
+    // Settle only this asset so claims cannot consume another token's yield.
+    let acc = storage::get_yield_accumulator(env, &asset);
+    storage::set_yield_snapshot(env, &member, &asset, acc);
+    util::token_client_for(env, &asset).transfer(&util::contract_address(env), &member, &pending);
     let now = env.ledger().timestamp();
-    env.events().publish(
-        (symbol_short!("claimed"), member.clone(), pending),
-        StakingRewardClaimed {
-            member,
-            amount: pending,
-            timestamp: now,
-        },
-    );
+    if asset == storage::get_token(env) {
+        env.events().publish(
+            (symbol_short!("claimed"), member.clone(), pending),
+            StakingRewardClaimed {
+                member,
+                amount: pending,
+                timestamp: now,
+            },
+        );
+    } else {
+        env.events()
+            .publish((symbol_short!("clm_ast"),), (member, asset, pending));
+    }
     Ok(pending)
 }
 
@@ -197,8 +253,23 @@ fn total_active_contributions(env: &Env) -> i128 {
 /// `claim_rewards` and the public `get_pending_yield` view so the amount
 /// displayed is always the amount paid.
 pub(crate) fn compute_pending_yield(env: &Env, addr: &Address) -> i128 {
-    let acc = storage::get_yield_accumulator(env);
-    let snap = storage::get_yield_snapshot(env, addr);
+    if !storage::is_initialized(env) {
+        return 0;
+    }
+    let asset = storage::get_token(env);
+    compute_pending_yield_in_asset(env, addr, &asset)
+}
+
+pub(crate) fn compute_pending_yield_in_asset(
+    env: &Env,
+    addr: &Address,
+    asset: &Address,
+) -> i128 {
+    if !storage::is_initialized(env) {
+        return 0;
+    }
+    let acc = storage::get_yield_accumulator(env, asset);
+    let snap = storage::get_yield_snapshot(env, addr, asset);
     (acc - snap).max(0)
 }
 

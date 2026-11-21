@@ -55,11 +55,13 @@ destination, amount, and proposal ID before approving it in the wallet.
 ## 4. Exit
 
 1. Confirm the member has no active loan and decide whether to claim pending
-   yield separately.
-2. Optionally call `claim_rewards(member)` to withdraw accrued interest.
-3. Call `exit_dao(member)`. The contract calculates the member’s pro-rata
-   treasury share, returns the membership balance and stake, marks the member
-   inactive, and emits `exited`.
+   yield separately. `claim_rewards(member)` claims base-token yield;
+   `claim_rewards_in_asset(member, asset)` claims yield in another asset.
+2. Call `exit_dao(member)`. The contract calculates the base-token pro-rata
+   treasury share, returns the stake, settles pending yield in every tracked
+   asset, marks the member inactive, and emits `exited` plus `exit_a` events
+   for non-base yield payouts. The non-base capital basket remains a proposed
+   design in ADR-0010.
 4. Confirm the member is no longer active with `is_member(member)`.
 
 Exiting is irreversible for that membership record, but a former member may

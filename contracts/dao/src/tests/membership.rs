@@ -91,6 +91,97 @@ fn yield_accumulator_join_claim_exit_rejoin() {
     assert_eq!(s.client.get_pending_yield(&v1), 0);
 }
 
+#[test]
+fn second_asset_interest_claim_and_exit_stay_in_that_asset() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let claimant = s.members.get(1).unwrap();
+    let exiting_member = s.members.get(2).unwrap();
+    let asset = whitelist_second_asset(&s, 10_000);
+    let base_pending_before = s.client.get_pending_yield(&claimant);
+
+    let pid = s
+        .client
+        .request_loan_in_asset(&borrower, &1_000, &asset.address, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&claimant, &pid, &true);
+    s.client.vote_on_loan_proposal(&exiting_member, &pid, &true);
+
+    let loan = s.client.get_loan(&pid).unwrap();
+    let interest = loan.total_repayment - loan.principal;
+    let per_member = interest / 3;
+    assert!(per_member > 0);
+
+    mint_asset(&s, &asset.address, &borrower, loan.total_repayment);
+    s.client
+        .repay_loan_in_asset(&borrower, &pid, &asset.address);
+
+    assert_eq!(s.client.get_pending_yield(&claimant), base_pending_before);
+    assert_eq!(
+        s.client
+            .get_pending_yield_in_asset(&claimant, &asset.address),
+        per_member
+    );
+    assert_eq!(
+        s.client
+            .claim_rewards_in_asset(&claimant, &asset.address),
+        per_member
+    );
+    assert_eq!(asset.balance(&claimant), per_member);
+    assert_eq!(s.client.get_pending_yield(&claimant), base_pending_before);
+
+    let exit_pending = s
+        .client
+        .get_pending_yield_in_asset(&exiting_member, &asset.address);
+    let asset_balance_before_exit = asset.balance(&exiting_member);
+    s.client.exit_dao(&exiting_member);
+    assert_eq!(
+        asset.balance(&exiting_member),
+        asset_balance_before_exit + exit_pending
+    );
+    assert_eq!(
+        s.client
+            .get_pending_yield_in_asset(&exiting_member, &asset.address),
+        0
+    );
+}
+
+#[test]
+fn legacy_base_yield_values_remain_claimable_after_storage_migration() {
+    let s = setup(1);
+    let member = s.members.get(0).unwrap();
+    let base_asset = s.client.get_token().unwrap();
+
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&crate::storage::DataKey::YieldAccumulator, &100i128);
+        s.env.storage().persistent().set(
+            &crate::storage::DataKey::MemberYieldSnapshot(member.clone()),
+            &40i128,
+        );
+        s.env.storage().persistent().set(
+            &crate::storage::DataKey::YieldRemainder,
+            &7i128,
+        );
+        s.env.storage().persistent().remove(
+            &crate::storage::YieldKey::MemberYieldSnapshot(member.clone(), base_asset.clone()),
+        );
+    });
+
+    assert_eq!(s.client.get_pending_yield(&member), 60);
+    assert_eq!(
+        s.env.as_contract(&s.client.address, || {
+            crate::storage::get_yield_remainder(&s.env, &base_asset)
+        }),
+        7
+    );
+    assert_eq!(s.client.claim_rewards(&member), 60);
+    assert_eq!(s.client.get_pending_yield(&member), 0);
+    assert_eq!(s.token.balance(&member), MINT - FEE + 60);
+}
+
 // ==================== issue: total_contributions ====================
 #[test]
 fn ten_join_five_exit_pays_remaining_members_full_share() {

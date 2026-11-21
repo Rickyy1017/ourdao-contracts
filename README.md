@@ -134,8 +134,9 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | Method | Description |
 |---|---|
 | `register_member(member)` | Pays the membership fee, joins the DAO. |
-| `exit_dao(member)` | Withdraws pro-rata share + stake + pending yield. Blocked while `has_active_loan`. |
-| `claim_rewards(member)` | Withdraws accrued loan-interest yield. |
+| `exit_dao(member)` | Withdraws the base-token pro-rata share and stake, plus pending yield in each tracked asset. Blocked while `has_active_loan`. |
+| `claim_rewards(member)` | Withdraws accrued base-token loan-interest yield. |
+| `claim_rewards_in_asset(member, asset)` | Withdraws accrued loan-interest yield in `asset` without settling other assets. |
 | `delegate_vote(delegator, delegatee)` | Delegates voting power to another active member (single-level). |
 
 **Lending**
@@ -150,7 +151,7 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | `vote_batch(voter, votes)` | Casts votes across multiple loan/treasury proposals in one call. |
 | `disburse_approved_loan(loan_id)` | Disburses an approved loan's funds. |
 | `repay_loan(borrower, loan_id)` | Collects the full outstanding balance in one transaction. |
-| `repay_loan_in_asset(borrower, loan_id, asset)` | `repay_loan` that fails with `AssetMismatch` unless `asset` is the loan's own asset. Interest on a non-base-asset loan stays in the treasury instead of being distributed as yield. |
+| `repay_loan_in_asset(borrower, loan_id, asset)` | `repay_loan` that fails with `AssetMismatch` unless `asset` is the loan's own asset. Interest is credited as yield in the loan's own asset. |
 | `repay_loan_partial(borrower, loan_id, amount)` | Collects up to `amount` of the outstanding balance. Applies to accrued interest first, then principal; the loan flips to repaid only once the balance reaches exactly zero. |
 | `mark_loan_defaulted(loan_id)` | **Permissionless.** Callable once `due_time + grace_period` has elapsed. |
 | `expire_loan_proposal(proposal_id)` | **Permissionless keeper call.** Persists the expired state for a proposal whose voting window has passed without reaching quorum. No-op on repeat calls. |
@@ -212,7 +213,7 @@ The *k*-th bonus vote starts at `k² × 100` staked tokens, so the thresholds ar
 | `attach_document(caller, kind, proposal_id, content_hash)` | Anchors an off-chain content hash (e.g. IPFS CID) to a real loan/treasury proposal. |
 | `get_document(kind, proposal_id) -> Option<Bytes>` | View. |
 
-**Views** — `get_member`, `get_member_overview`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_loan_proposal_count`, `get_treasury_proposal`, `get_treasury_proposal_count`, `get_loan_policy`, `get_pending_policy_update`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_version`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_stake_weight_unit`, `get_max_stake_bonus`, `get_pending_yield`, `get_delegate`, `list_members`, `list_treasury_proposals`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`.
+**Views** — `get_member`, `get_member_overview`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_loan_proposal_count`, `get_treasury_proposal`, `get_treasury_proposal_count`, `get_loan_policy`, `get_pending_policy_update`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_version`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_stake_weight_unit`, `get_max_stake_bonus`, `get_pending_yield` (base token), `get_pending_yield_in_asset(member, asset)`, `get_delegate`, `list_members`, `list_treasury_proposals`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`.
 
 > **Note on Treasury Balance Views (#500, #501)**: `get_treasury_balance` and `get_treasury_balance_in_asset` report the DAO's lendable treasury balance, explicitly excluding staked member deposits for the base token to maintain invariant L1. Raw, stake-inclusive token balance is not exposed as a separate entrypoint because external audit/reconciliation tools can query the token contract's standard `balance(&dao_address)` directly. Furthermore, `get_treasury_balance_in_asset(asset)` (#501) is not restricted to whitelisted assets; it reads the contract's actual balance for any queried asset address.
 
@@ -229,6 +230,8 @@ Every state-changing call publishes an event, which `ourdao-backend` indexes sin
 | `joined` | `(member, fee)` | `register_member` |
 | `exited` | `(member, share)` | `exit_dao` |
 | `claimed` | `(member, pending)` | `claim_rewards` |
+| `exit_a` | `(member, asset, amount)` | `exit_dao` non-base asset yield settlement |
+| `clm_ast` | `(member, asset, amount)` | `claim_rewards_in_asset` for a non-base asset |
 | `loan_req` | `(id, borrower, amount, total_repayment, asset)` | `request_loan` / `request_loan_in_asset` — `asset` is the loan's asset (the base token unless set) |
 | `loan_edit` | `(proposal_id, borrower, new_amount, total_repayment)` | `edit_loan_proposal` |
 | `loan_vote` | `(proposal_id, voter, support)` | `vote_on_loan_proposal` |
@@ -236,7 +239,7 @@ Every state-changing call publishes an event, which `ourdao-backend` indexes sin
 | `loan_rpy` | `(loan_id, borrower, outstanding, asset)` | `repay_loan` / `repay_loan_partial` / `repay_loan_in_asset` — `outstanding` is the balance still remaining *after* this payment (0 for a payment that fully repays the loan) |
 | `loan_dflt` | `(loan_id, borrower, penalty)` | `mark_loan_defaulted` |
 | `loan_exp` | `(proposal_id, borrower)` | `expire_loan_proposal` (permissionless keeper) |
-| `interest` | `(interest, active_members, asset)` | fired alongside `loan_rpy` for base-token repayments only; `asset` is always the base token |
+| `interest` | `(interest, active_members, asset)` | fired alongside `loan_rpy` for positive interest repayments in any asset |
 | `tre_prop` | `(id, amount, destination, private)` | `propose_treasury_withdrawal` |
 | `tre_vote` | `(id, voter, support)` | `vote_on_treasury_proposal` |
 | `tre_exec` | `(id, amount, destination)` | auto-fired on execution |

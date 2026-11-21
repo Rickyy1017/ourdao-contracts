@@ -958,6 +958,7 @@ fn loan_in_second_asset_disburses_and_repays_in_that_asset() {
     let v2 = s.members.get(2).unwrap();
     let asset = whitelist_second_asset(&s, 10_000);
     let base_treasury = s.client.get_treasury_balance();
+    let base_pending_before = s.client.get_pending_yield(&v1);
 
     // Sized against the second asset's treasury, not the base token's 3_000.
     let pid = s
@@ -991,8 +992,14 @@ fn loan_in_second_asset_disburses_and_repays_in_that_asset() {
         s.client.get_treasury_balance_in_asset(&asset.address),
         6_000 + loan.total_repayment
     );
-    // Interest in a non-base asset isn't distributed as base-token yield.
+    // Interest is credited only to the asset it was repaid in.
     assert_eq!(s.client.get_treasury_balance(), base_treasury);
+    assert_eq!(s.client.get_pending_yield(&v1), base_pending_before);
+    let interest = loan.total_repayment - loan.principal;
+    assert_eq!(
+        s.client.get_pending_yield_in_asset(&v1, &asset.address),
+        interest / 3
+    );
     assert!(!s.client.get_member(&borrower).unwrap().has_active_loan);
 }
 
@@ -1262,15 +1269,35 @@ fn default_in_second_asset() {
     let v2 = s.members.get(2).unwrap();
     let asset = whitelist_second_asset(&s, 10_000);
 
-    // Give every member unclaimed base-token yield first, so the forfeiture
+    // Give every member unclaimed yield in both assets so the forfeiture
     // on default is observable.
     let base_pid = s.client.request_loan(&v1, &1_000, &None);
     advance(&s.env, EDITING + 1);
     s.client.vote_on_loan_proposal(&v2, &base_pid, &true);
     s.client.vote_on_loan_proposal(&borrower, &base_pid, &true);
     s.client.repay_loan(&v1, &base_pid);
-    let accrued = s.client.get_pending_yield(&borrower);
-    assert!(accrued > 0);
+
+    let asset_yield_pid = s
+        .client
+        .request_loan_in_asset(&v1, &1_000, &asset.address, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&borrower, &asset_yield_pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &asset_yield_pid, &true);
+    let asset_yield_loan = s.client.get_loan(&asset_yield_pid).unwrap();
+    mint_asset(
+        &s,
+        &asset.address,
+        &v1,
+        asset_yield_loan.total_repayment,
+    );
+    s.client
+        .repay_loan_in_asset(&v1, &asset_yield_pid, &asset.address);
+    let accrued_base = s.client.get_pending_yield(&borrower);
+    let accrued_asset = s
+        .client
+        .get_pending_yield_in_asset(&borrower, &asset.address);
+    assert!(accrued_base > 0);
+    assert!(accrued_asset > 0);
 
     let pid = s
         .client
@@ -1344,10 +1371,19 @@ fn default_in_second_asset() {
 
     // Unclaimed base-token yield is forfeited; everyone else keeps theirs.
     assert_eq!(s.client.get_pending_yield(&borrower), 0);
-    assert_eq!(s.client.get_pending_yield(&v2), accrued);
+    assert_eq!(
+        s.client
+            .get_pending_yield_in_asset(&borrower, &asset.address),
+        0
+    );
+    assert_eq!(s.client.get_pending_yield(&v2), accrued_base);
+    assert_eq!(
+        s.client.get_pending_yield_in_asset(&v2, &asset.address),
+        accrued_asset
+    );
 
-    // The reduced contribution shrinks the base-token exit share. The exit
-    // share never includes asset B, so exiting pays out base token only.
+    // The reduced contribution shrinks the base-token exit share. The capital
+    // share never includes asset B; the forfeited B yield was settled above.
     let expected_share = base_treasury * member.contribution / (3 * FEE - expected_penalty);
     assert_eq!(s.client.calculate_exit_share(&borrower), expected_share);
     let borrower_base = s.token.balance(&borrower);

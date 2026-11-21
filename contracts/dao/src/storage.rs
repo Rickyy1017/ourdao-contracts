@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, IntoVal, String, Val, Vec};
 
 use crate::types::{Loan, LoanPolicy, LoanProposal, Member, PendingPolicyUpdate, TreasuryProposal};
 
@@ -54,6 +54,7 @@ pub(crate) enum DataKey {
     /// Cached count, refreshed from live proposal state before quota checks.
     OpenProposals(Address),
     // ---- pull-based yield accrual ----
+    // Keep these original base-token keys for lazy reads during migration.
     YieldAccumulator,
     YieldRemainder,
     MemberYieldSnapshot(Address),
@@ -73,6 +74,8 @@ pub(crate) enum DataKey {
     TokenWhitelisted(Address),
     /// Extra whitelisted assets, in the order they were added.
     WhitelistedTokens,
+    /// Assets that have ever accrued member yield, including removed assets.
+    YieldAssets,
     /// Earliest timestamp a proposed asset addition may be executed.
     PendingTokenAddition(Address),
     /// Asset a loan proposal (and the loan it becomes, which shares its id)
@@ -89,13 +92,24 @@ pub(crate) enum DataKey {
     OutstandingPrincipal(Address),
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub(crate) enum YieldKey {
+    YieldAccumulator(Address),
+    YieldRemainder(Address),
+    MemberYieldSnapshot(Address, Address),
+}
+
 pub fn extend_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
 }
 
-fn extend_persistent(env: &Env, key: &DataKey) {
+fn extend_persistent<K>(env: &Env, key: &K)
+where
+    K: IntoVal<Env, Val> + ?Sized,
+{
     env.storage()
         .persistent()
         .extend_ttl(key, PERSISTENT_THRESHOLD, PERSISTENT_BUMP);
@@ -422,28 +436,53 @@ pub fn set_stake(env: &Env, addr: &Address, amount: i128) {
 
 // ---------- pull-based yield accrual ----------
 
-pub fn get_yield_accumulator(env: &Env) -> i128 {
-    env.storage()
-        .instance()
-        .get(&DataKey::YieldAccumulator)
-        .unwrap_or(0)
+pub fn get_yield_accumulator(env: &Env, asset: &Address) -> i128 {
+    let key = YieldKey::YieldAccumulator(asset.clone());
+    if let Some(value) = env.storage().instance().get(&key) {
+        extend_instance(env);
+        value
+    } else if asset == &get_token(env) {
+        let legacy_value = env
+            .storage()
+            .instance()
+            .get(&DataKey::YieldAccumulator)
+            .unwrap_or(0);
+        extend_instance(env);
+        legacy_value
+    } else {
+        0
+    }
 }
 
-pub fn set_yield_accumulator(env: &Env, value: i128) {
-    env.storage()
-        .instance()
-        .set(&DataKey::YieldAccumulator, &value);
+pub fn set_yield_accumulator(env: &Env, asset: &Address, value: i128) {
+    env.storage().instance().set(
+        &YieldKey::YieldAccumulator(asset.clone()),
+        &value,
+    );
+    extend_instance(env);
 }
 
-pub fn get_yield_snapshot(env: &Env, addr: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::MemberYieldSnapshot(addr.clone()))
-        .unwrap_or(0)
+pub fn get_yield_snapshot(env: &Env, addr: &Address, asset: &Address) -> i128 {
+    let key = YieldKey::MemberYieldSnapshot(addr.clone(), asset.clone());
+    if let Some(value) = env.storage().persistent().get(&key) {
+        extend_persistent(env, &key);
+        value
+    } else if asset == &get_token(env) {
+        let legacy_key = DataKey::MemberYieldSnapshot(addr.clone());
+        match env.storage().persistent().get(&legacy_key) {
+            Some(value) => {
+                extend_persistent(env, &legacy_key);
+                value
+            }
+            None => 0,
+        }
+    } else {
+        0
+    }
 }
 
-pub fn set_yield_snapshot(env: &Env, addr: &Address, value: i128) {
-    let key = DataKey::MemberYieldSnapshot(addr.clone());
+pub fn set_yield_snapshot(env: &Env, addr: &Address, asset: &Address, value: i128) {
+    let key = YieldKey::MemberYieldSnapshot(addr.clone(), asset.clone());
     env.storage().persistent().set(&key, &value);
     extend_persistent(env, &key);
 }
@@ -497,17 +536,57 @@ pub fn remove_commit(env: &Env, id: u32, voter: &Address) {
         .remove(&DataKey::Commit(id, voter.clone()));
 }
 
-pub fn get_yield_remainder(env: &Env) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::YieldRemainder)
-        .unwrap_or(0)
+pub fn get_yield_remainder(env: &Env, asset: &Address) -> i128 {
+    let key = YieldKey::YieldRemainder(asset.clone());
+    if let Some(value) = env.storage().persistent().get(&key) {
+        extend_persistent(env, &key);
+        value
+    } else if asset == &get_token(env) {
+        let legacy_key = DataKey::YieldRemainder;
+        match env.storage().persistent().get(&legacy_key) {
+            Some(value) => {
+                extend_persistent(env, &legacy_key);
+                value
+            }
+            None => 0,
+        }
+    } else {
+        0
+    }
 }
 
-pub fn set_yield_remainder(env: &Env, value: i128) {
-    env.storage()
+pub fn set_yield_remainder(env: &Env, asset: &Address, value: i128) {
+    let key = YieldKey::YieldRemainder(asset.clone());
+    env.storage().persistent().set(&key, &value);
+    extend_persistent(env, &key);
+}
+
+pub fn record_yield_asset(env: &Env, asset: &Address) {
+    let key = DataKey::YieldAssets;
+    let mut assets = env
+        .storage()
         .persistent()
-        .set(&DataKey::YieldRemainder, &value);
+        .get::<_, Vec<Address>>(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !assets.contains(asset) {
+        assets.push_back(asset.clone());
+        env.storage().persistent().set(&key, &assets);
+    }
+    extend_persistent(env, &key);
+}
+
+pub fn get_yield_assets(env: &Env) -> Vec<Address> {
+    let mut assets = get_whitelisted_tokens(env);
+    let key = DataKey::YieldAssets;
+    if let Some(recorded) = env.storage().persistent().get::<_, Vec<Address>>(&key) {
+        extend_persistent(env, &key);
+        for asset in recorded.iter() {
+            if !assets.contains(&asset) {
+                assets.push_back(asset);
+            }
+        }
+    }
+    assets
 }
 
 pub fn get_delegation(env: &Env, member: &Address) -> Option<Address> {

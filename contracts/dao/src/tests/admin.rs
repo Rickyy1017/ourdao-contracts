@@ -168,6 +168,13 @@ fn pause_blocks_all_mutating_entrypoints_except_repay() {
             ),
         },
         EntryPoint {
+            name: "claim_rewards_in_asset",
+            blocked: matches!(
+                s.client.try_claim_rewards_in_asset(&borrower, &s.token.address),
+                Err(Ok(Error::Paused))
+            ),
+        },
+        EntryPoint {
             name: "delegate_vote",
             blocked: matches!(
                 s.client.try_delegate_vote(&borrower, &voter),

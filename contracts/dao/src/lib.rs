@@ -134,6 +134,16 @@ impl OurDao {
         membership::claim_rewards(&env, member)
     }
 
+    /// Withdraws accrued yield in the specified asset without affecting other
+    /// asset snapshots.
+    pub fn claim_rewards_in_asset(
+        env: Env,
+        member: Address,
+        asset: Address,
+    ) -> Result<i128, Error> {
+        membership::claim_rewards_in_asset(&env, member, asset)
+    }
+
     pub fn delegate_vote(env: Env, delegator: Address, delegatee: Address) -> Result<(), Error> {
         membership::delegate_vote(&env, delegator, delegatee)
     }
@@ -601,6 +611,11 @@ impl OurDao {
 
     pub fn get_pending_yield(env: Env, member: Address) -> i128 {
         membership::compute_pending_yield(&env, &member)
+    }
+
+    /// Returns `member`'s unclaimed yield denominated in `asset`.
+    pub fn get_pending_yield_in_asset(env: Env, member: Address, asset: Address) -> i128 {
+        membership::compute_pending_yield_in_asset(&env, &member, &asset)
     }
 
     /// Returns the address `delegator` has delegated their vote to, or `None`

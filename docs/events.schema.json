@@ -534,6 +534,24 @@
       "required": ["member", "share"],
       "additionalProperties": false
     },
+    "exit_a": {
+      "type": "object",
+      "properties": {
+        "member": {
+          "type": "string",
+          "format": "address"
+        },
+        "asset": {
+          "type": "string",
+          "format": "address"
+        },
+        "amount": {
+          "type": "integer"
+        }
+      },
+      "required": ["member", "asset", "amount"],
+      "additionalProperties": false
+    },
     "claimed": {
       "type": "object",
       "properties": {
@@ -549,6 +567,24 @@
         }
       },
       "required": ["member", "amount", "timestamp"],
+      "additionalProperties": false
+    },
+    "clm_ast": {
+      "type": "object",
+      "properties": {
+        "member": {
+          "type": "string",
+          "format": "address"
+        },
+        "asset": {
+          "type": "string",
+          "format": "address"
+        },
+        "amount": {
+          "type": "integer"
+        }
+      },
+      "required": ["member", "asset", "amount"],
       "additionalProperties": false
     },
     "delegate": {

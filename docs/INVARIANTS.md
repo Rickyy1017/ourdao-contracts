@@ -11,17 +11,21 @@ for the process.
 
 ## Accounting invariants
 
-### A1 — Distributed interest never exceeds collected interest
-**Statement:** The sum of `get_pending_yield(m)` across all active members is
-less than or equal to the total `interest` passed to `distribute_interest`.
-Specifically, each member receives exactly `interest / active_members` and the
-remainder (`interest % active_members`) stays in the treasury.
+### A1 — Distributed interest never exceeds collected interest per asset
+**Statement:** For each asset, the sum of pending yield across active members
+cannot exceed the total collected interest distributed in that asset. Each
+positive interest payment is combined only with that asset's carried
+remainder, divided equally among active members, and any indivisible
+remainder stays in that same asset. No asset's interest changes another
+asset's accumulator or pending yield.
 
 **Interaction with Rebates and Discounts (ADR-0008) (#506):**
 Any future rebate or discount mechanism (such as ADR-0008 early repayment discount or ADR-0005 reputation discount) must only ever reduce the net interest amount passed to `distribute_interest`. Yield must never be credited for interest that was waived or discounted, since waived interest was never collected into the treasury. Implementers of ADR-0008 must ensure that `distribute_interest` receives only `collected_interest`, preserving Invariant A1.
 
 **Tested:** ✅ `tests::properties::distributed_interest_never_exceeds_collected`
-(`contracts/dao/src/tests/properties.rs`)
+(`contracts/dao/src/tests/properties.rs`) for the base token, and
+`tests::membership::second_asset_interest_claim_and_exit_stay_in_that_asset`
+for non-base isolation.
 
 ---
 
@@ -92,9 +96,11 @@ asset as for a base-token loan:
 - No tokens move. The borrower keeps the unpaid principal, and the treasury
   of the loan's own asset absorbs the loss. That asset's outstanding principal
   (A5) is written off. Nothing is recovered from the base token.
-- The borrower forfeits their unclaimed base-token yield (#89).
-- Members have no exit claim on non-base assets, so a default in asset B only
-  reduces the borrower's base-token exit share.
+- The borrower forfeits their unclaimed yield in each tracked asset (#89,
+  #271).
+- Non-base capital has no pro-rata exit share yet; accrued yield in that asset
+  is settled separately when a member claims or exits. ADR-0010 proposes the
+  future basket treatment of capital.
 
 **Tested:** ✅ `tests::loans::default_in_second_asset` (non-base asset),
 `tests::loans::loan_default_applies_penalty_and_frees_borrower` (base token)
@@ -222,7 +228,7 @@ rounding favours the DAO treasury:
 | 4 | `contracts/dao/src/loans.rs:121` | `treasury * max_loan_to_treasury_ratio / BASIS_POINTS` | **Floor (DOWN)** | Treasury Outflow | Max loan disbursement cap; rounds down to protect treasury reserves. | ✅ `tests::loans::loan_exceeds_treasury_ratio` |
 | 5 | `contracts/dao/src/loans.rs:524` | `(outstanding * default_penalty_bps + BASIS_POINTS - 1) / BASIS_POINTS` | **Ceil (UP)** | Member Debt | Overdue penalty added on late repayment; rounds up to favour treasury. | ✅ `tests::loans::overdue_penalty_rounds_up_to_favour_treasury` |
 | 6 | `contracts/dao/src/loans.rs:643` | `(contribution * default_penalty_bps + BASIS_POINTS - 1) / BASIS_POINTS` | **Ceil (UP)** | Member Debt | Default penalty slashed from borrower contribution; rounds up to protect treasury. | ✅ `tests::loans::default_penalty_rounds_up_to_favour_treasury` |
-| 7 | `contracts/dao/src/loans.rs:686` | `total_interest / active_members` | **Floor (DOWN)** | Member Payout | Per-member yield distribution; rounds down and remainder is stored in `yield_remainder` (Invariant A1). | ✅ `properties::distributed_interest_never_exceeds_collected` |
+| 7 | `contracts/dao/src/loans.rs:782` | `total_interest / active_members` | **Floor (DOWN)** | Member Payout | Per-asset yield distribution; rounds down and remainder is stored for the same asset (Invariant A1). | ✅ `properties::distributed_interest_never_exceeds_collected` |
 | 8 | `contracts/dao/src/membership.rs:154` | `treasury * contribution / total_contributions` | **Floor (DOWN)** | Member Payout | Pro-rata exit share; rounds down so total exit shares never exceed treasury (Invariant A2). | ✅ `tests::membership::exit_share_rounds_down_to_favour_treasury`, `properties::exit_shares_never_exceed_treasury` |
 | 9 | `contracts/dao/src/util.rs:129` | `staked / STAKE_WEIGHT_UNIT` | **Floor (DOWN)** | Governance | Stake weight bonus units before `isqrt`; prevents partial units from granting unearned votes. | ✅ `properties::boost_is_constant_within_each_square_band` |
 | 10 | `contracts/dao/src/util.rs:185` | `(base * threshold_bps + BASIS_POINTS - 1) / BASIS_POINTS` | **Ceil (UP)** | Governance | Minimum required votes for consensus quorum; rounds up to strictly enforce voting threshold. | ✅ `tests::loans::loan_proposal_uses_dynamic_quorum_threshold` |
