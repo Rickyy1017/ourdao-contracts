@@ -29,6 +29,7 @@ All notable changes to `ourdao-contracts` are documented here. The format follow
 - `default_in_second_asset` test. Default slashing for loans in a non-base asset is documented as invariant A6 in `docs/INVARIANTS.md` (#287).
 
 ### Fixed
+- `remove_token` now rejects removal while the treasury still holds any balance of that asset (#272).
 - Audit all eight DAO token-transfer call sites and align state effects before external token interactions (#317).
 - Enforce and regression-test admin-only `unpause`: the dedicated pauser may pause but cannot resume the DAO (#319).
 - Fixed `vote_batch` to authenticate the voter once for the batch instead of re-authorizing per proposal vote, preventing auth collisions (#308).

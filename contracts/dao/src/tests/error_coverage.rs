@@ -8,7 +8,9 @@ use crate::error::Error;
 use crate::types::LoanPolicy;
 use crate::{OurDao, OurDaoClient};
 
-use super::common::{advance, policy, setup, DAOBuilder, EDITING, FEE, VOTING_PERIOD};
+use super::common::{
+    advance, policy, setup, whitelist_second_asset, DAOBuilder, EDITING, FEE, VOTING_PERIOD,
+};
 
 // AlreadyInitialized = 1
 #[test]
@@ -709,6 +711,16 @@ fn error_cannot_remove_base_token() {
 
     let result = s.client.try_remove_token(&s.admin, &base_token);
     assert_eq!(result, Err(Ok(Error::CannotRemoveBaseToken)));
+}
+
+// TokenHasBalance = 92
+#[test]
+fn error_token_has_balance() {
+    let s = setup(0);
+    let funded = whitelist_second_asset(&s, 1);
+
+    let result = s.client.try_remove_token(&s.admin, &funded.address);
+    assert_eq!(result, Err(Ok(Error::TokenHasBalance)));
 }
 
 // SeedingLocked = 88

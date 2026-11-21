@@ -310,9 +310,9 @@ pub fn execute_token_addition(env: &Env, caller: Address, token: Address) -> Res
     Ok(())
 }
 
-/// Removes `token` from the whitelist, blocking new loans and withdrawals in
-/// it. Loans already issued in `token` can still be repaid. The base token is
-/// permanent.
+/// Removes an empty `token` from the whitelist, blocking new loans and
+/// withdrawals in it. Loans already issued in `token` can still be repaid.
+/// The base token is permanent.
 #[allow(deprecated)]
 pub fn remove_token(env: &Env, caller: Address, token: Address) -> Result<(), Error> {
     util::require_initialized(env)?;
@@ -322,6 +322,9 @@ pub fn remove_token(env: &Env, caller: Address, token: Address) -> Result<(), Er
     }
     if !storage::is_token_whitelisted(env, &token) {
         return Err(Error::TokenNotWhitelisted);
+    }
+    if util::treasury_balance_for(env, &token) > 0 {
+        return Err(Error::TokenHasBalance);
     }
     storage::set_token_whitelisted(env, &token, false);
     extend_instance(env);

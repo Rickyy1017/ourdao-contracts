@@ -1019,6 +1019,21 @@ fn token_whitelist_lifecycle() {
     );
 }
 
+#[test]
+fn remove_token_requires_empty_treasury() {
+    let s = setup(1);
+    let funded = whitelist_second_asset(&s, 100);
+    assert_eq!(
+        s.client.try_remove_token(&s.admin, &funded.address),
+        Err(Ok(Error::TokenHasBalance))
+    );
+    assert!(s.client.is_token_whitelisted(&funded.address));
+
+    let empty = whitelist_second_asset(&s, 0);
+    s.client.remove_token(&s.admin, &empty.address);
+    assert!(!s.client.is_token_whitelisted(&empty.address));
+}
+
 // Admin list handling uses host-side lookups (#357); the list stays a set.
 #[test]
 fn initialize_rejects_non_adjacent_duplicate_admins() {

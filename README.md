@@ -264,6 +264,7 @@ Numeric codes are stable and part of the ABI — new variants get appended rathe
 | 60–67 | Native-swap modules: `NameTaken`, `NameNotFound`, `NoStake`, `InsufficientStake`, `NoCommitment`, `CommitmentMismatch`, `AlreadyRevealed`, `NothingToClaim` |
 | 70–72 | Appended: `ProposalNotExpired`, `InvalidName`, `NotYetRevealed` |
 | 83–87 | Multi-token treasury: `TokenNotWhitelisted`, `TokenAlreadyWhitelisted`, `NoPendingTokenAddition`, `AssetMismatch`, `CannotRemoveBaseToken` |
+| 92 | Multi-token safety: `TokenHasBalance` |
 
 ## Build & test
 
